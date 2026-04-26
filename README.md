@@ -1,3 +1,3 @@
-# Welcome to your Lovable project
+# Welcome to campus-guide-ai
 
 TODO: Document your project here
