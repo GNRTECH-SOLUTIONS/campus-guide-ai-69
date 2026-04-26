@@ -1,5 +1,7 @@
 // Student Guidance Chatbot — streams replies via the Lovable AI Gateway.
 // CORS + bilingual (English/Urdu) student counselor system prompt.
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -32,13 +34,69 @@ STYLE:
 
 If asked something completely outside university life, politely steer back to student guidance.`;
 
+const MAX_MESSAGES = 50;
+const MAX_CONTENT_LEN = 4000;
+const ALLOWED_ROLES = new Set(["user", "assistant"]);
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
+    // ----- Auth: verify the caller's JWT -----
+    const authHeader = req.headers.get("Authorization") ?? "";
+    if (!authHeader.startsWith("Bearer ")) {
+      return new Response(JSON.stringify({ error: "Unauthorized" }), {
+        status: 401,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_ANON_KEY")!,
+      { global: { headers: { Authorization: authHeader } } },
+    );
+
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsErr } = await supabase.auth.getClaims(token);
+    if (claimsErr || !claimsData?.claims?.sub) {
+      return new Response(JSON.stringify({ error: "Unauthorized" }), {
+        status: 401,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // ----- Input validation -----
     const { messages } = await req.json();
     if (!Array.isArray(messages)) {
       return new Response(JSON.stringify({ error: "messages must be an array" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    if (messages.length === 0) {
+      return new Response(JSON.stringify({ error: "messages cannot be empty" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    if (messages.length > MAX_MESSAGES) {
+      return new Response(JSON.stringify({ error: "Too many messages" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    const sanitised = messages
+      .filter((m: any) => m && typeof m === "object" && ALLOWED_ROLES.has(m.role))
+      .map((m: any) => ({
+        role: m.role as "user" | "assistant",
+        content: String(m.content ?? "").slice(0, MAX_CONTENT_LEN),
+      }))
+      .filter((m) => m.content.length > 0);
+
+    if (sanitised.length === 0) {
+      return new Response(JSON.stringify({ error: "No valid messages" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -55,7 +113,7 @@ Deno.serve(async (req) => {
       },
       body: JSON.stringify({
         model: "google/gemini-3-flash-preview",
-        messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages],
+        messages: [{ role: "system", content: SYSTEM_PROMPT }, ...sanitised],
         stream: true,
       }),
     });
